@@ -1,99 +1,94 @@
-// HelpModal.jsx — a Help / FAQ overlay for the editor.
-import { useEffect } from "react";
+// GuideSelect.jsx — renders RXP guide names with their |T<fileId>:0|t icons as
+// real images, and a custom dropdown (native <option> can't show images) for
+// switching between sub-guides in a multi-guide file.
+import { useState, useRef, useEffect } from "react";
+import GameData from "./gamedata.js";
 
-export function HelpModal({ open, onClose }) {
+// Parse an RXP display string into ordered parts: text runs and icon tokens.
+// Handles |T<fileId>:0|t (icon by FileDataID) and strips colour codes
+// |cXXXXXXXX...|r → inner text. Returns [{text}|{icon:fileId}].
+export function parseRxpName(str) {
+  if (!str) return [];
+  // Remove colour wrappers but keep their inner text.
+  let s = str.replace(/\|c[0-9A-Za-z_]+_?/g, "").replace(/\|r/g, "");
+  const parts = [];
+  const re = /\|T(\d+):\d+\|t|\|T[^|]+\|t/g;
+  let last = 0, m;
+  while ((m = re.exec(s)) !== null) {
+    if (m.index > last) parts.push({ text: s.slice(last, m.index) });
+    if (m[1]) parts.push({ icon: Number(m[1]) });   // numeric FileDataID icon
+    // non-numeric texture tokens (e.g. chatbubble path) are dropped
+    last = re.lastIndex;
+  }
+  if (last < s.length) parts.push({ text: s.slice(last) });
+  return parts;
+}
+
+// Render a parsed RXP name inline with icon images.
+export function GuideName({ str, iconSize = 14 }) {
+  const parts = parseRxpName(str);
+  return (
+    <span className="rxp-name">
+      {parts.map((p, i) => {
+        if (p.text != null) return <span key={i}>{p.text}</span>;
+        const url = GameData.loaded ? GameData.iconUrl(p.icon) : null;
+        if (!url) return <span key={i} className="rxp-icon-missing" title={`icon ${p.icon}`} />;
+        return (
+          <img
+            key={i}
+            src={url}
+            alt=""
+            className="rxp-inline-icon"
+            style={{ width: iconSize, height: iconSize }}
+            onError={(e) => { e.currentTarget.style.display = "none"; }}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
+// Custom dropdown that shows guide names with rendered icons + step counts.
+export function GuideSelect({ guides, activeIndex, editsFor, onSelect }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
   useEffect(() => {
-    function onKey(e) { if (e.key === "Escape") onClose(); }
-    if (open) document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    function onDoc(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
 
-  if (!open) return null;
+  const active = guides[activeIndex];
+  const label = (g) => g.name || g.title || "Untitled guide";
 
   return (
-    <div className="help-overlay" onClick={onClose}>
-      <div className="help-modal" onClick={e => e.stopPropagation()}>
-        <div className="help-head">
-          <span className="help-title">RXP Guide Editor — Help</span>
-          <button className="help-close" onClick={onClose}>✕</button>
+    <div className="guide-dd" ref={ref}>
+      <button className="guide-dd-btn" onClick={() => setOpen(o => !o)} title="Switch sub-guide">
+        <GuideName str={label(active)} />
+        <span className="guide-dd-meta">· {active.steps.length} steps</span>
+        <span className="guide-dd-caret">{open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <div className="guide-dd-menu">
+          {guides.map((g, i) => {
+            const edits = editsFor(i);
+            return (
+              <div
+                key={i}
+                className={"guide-dd-row" + (i === activeIndex ? " active" : "")}
+                onClick={() => { onSelect(i); setOpen(false); }}
+              >
+                <GuideName str={label(g)} />
+                <span className="guide-dd-meta">
+                  {edits > 0 ? <span className="guide-dd-edits">✎{edits}</span> : null}
+                  · {g.steps.length} steps
+                </span>
+              </div>
+            );
+          })}
         </div>
-
-        <div className="help-body">
-          <section>
-            <h3>What this is</h3>
-            <p>
-              A purpose-built editor for RestedXP (RXP) speedrunning guide
-              <code> .lua</code> files. Load a guide, browse its steps, edit them
-              by hand or with AI help, preview how each step will look in-game,
-              and download the finished file.
-            </p>
-          </section>
-
-          <section>
-            <h3>Loading &amp; sub-guides</h3>
-            <p>
-              Drop a <code>.lua</code> file (or click to browse). A single file can
-              hold several guides — use the dropdown at the top to switch between
-              them. Each guide's edits are kept separately, and
-              <b> Download .lua</b> recompiles the whole file with every sub-guide
-              and your edits intact.
-            </p>
-          </section>
-
-          <section>
-            <h3>Guide Setup (the config block)</h3>
-            <p>
-              The <b>⚙ Setup</b> entry at the top of the step list is the header
-              that sits before step 1 — the <code>#name</code> (shown in the
-              dropdown), <code>#next</code> (the following section), and
-              class/faction tags like <code>&lt;&lt; Rogue</code> /
-              <code>&lt;&lt;Alliance</code>. Edit it there and click <b>Save setup</b>.
-            </p>
-          </section>
-
-          <section>
-            <h3>Quick-insert menus (manual editing)</h3>
-            <p>While editing a step's raw text, type a trigger character to search the bundled WoW Classic database — no IDs to memorize:</p>
-            <ul className="help-triggers">
-              <li><span className="t-at">@</span> NPCs — inserts a name, a <code>.goto</code> with coordinates, or a coloured name</li>
-              <li><span className="t-hash">#</span> Quests — inserts the quest ID or a full turn-in line</li>
-              <li><span className="t-colon">:</span> Items — inserts the item ID or a <code>|cRXP_LOOT_…|r</code> token</li>
-              <li><span className="t-bang">!</span> Spells — inserts a spell ID, with the right rank</li>
-              <li><span className="t-star">*</span> Icons — search by name (e.g. <code>*sword</code>) and insert the icon</li>
-              <li><span className="t-tilde">~</span> Formatting — chat-bubble “Talk to”, warnings, loot/buy/pick text</li>
-              <li><span className="t-dot">.</span> Directives — all RXP step directives, as ready scaffolds</li>
-            </ul>
-            <p className="help-note">
-              In the menu: <b>↑/↓</b> to move, <b>Enter</b> inserts the name,
-              <b> Shift+Enter</b> the ID / <code>.goto</code>, <b>⌘/Ctrl+Enter</b> the
-              richer snippet. Multi-word names work (e.g. <code>:Tough Wolf Meat</code>) —
-              the menu closes on its own once you type past a real name.
-            </p>
-          </section>
-
-          <section>
-            <h3>AI editing</h3>
-            <p>
-              Describe a change in plain language and the AI rewrites the step,
-              looking up real quest/NPC/item/spell IDs from the local database
-              first. You see exactly what it's doing, and review the change as a
-              diff before it's applied. It needs an Anthropic API key (entered in
-              the editor) and costs a small amount per edit; the cost meter in the
-              top bar shows your session total.
-            </p>
-          </section>
-
-          <section>
-            <h3>Feedback</h3>
-            <p>
-              Made by <b style={{ color: "#c9963a" }}>Rook</b>. Questions, bugs or
-              ideas are very welcome — reach out to
-              <b style={{ color: "#9ccf7a" }}> rookgalaxy_</b> on Discord, or find me
-              on the <b style={{ color: "#9ccf7a" }}>Kamisayo Speedruns</b> server.
-            </p>
-          </section>
-        </div>
-      </div>
+      )}
     </div>
   );
 }

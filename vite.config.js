@@ -1,66 +1,86 @@
-// test/snippets.test.mjs — tests for the static formatting (~) and directive (.)
-// menus: trigger detection edge cases + snippet filtering. Run: node --test
+// test/guide.test.mjs — unit tests for the pure guide functions.
+// Run: node --test
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detectTrigger } from "../src/mention-trigger.js";
-import { searchStatic, CHAT_BUBBLE, DIRECTIVES } from "../src/snippets.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import {
+  parseGuide, extractStepType, buildGuideOutput, normalizeLines, computeDiff,
+} from "../src/guide.js";
 
-const at = (t) => detectTrigger(t, t.length);
+const here = dirname(fileURLToPath(import.meta.url));
+const sample = readFileSync(join(here, "fixtures", "sample-guide.lua"), "utf8");
 
-test("~ opens the formatting menu at a boundary", () => {
-  const r = at("~");
-  assert.equal(r.static, true);
-  assert.equal(r.kind, "format");
-  assert.equal(r.query, "");
+test("parseGuide splits the right number of steps", () => {
+  const g = parseGuide(sample);
+  assert.equal(g.steps.length, 4);
 });
 
-test("~ works after an RXP boundary (>>)", () => {
-  assert.equal(at(">>Talk ~").kind, "format");
+test("parseGuide captures the original title (incl. icon token)", () => {
+  const g = parseGuide(sample);
+  assert.equal(g.title, "Kamisayo |T236448:0|t Speedrun 1-14");
 });
 
-test(". opens the directive menu only at the start of a line", () => {
-  assert.equal(at(".").kind, "directive");
-  assert.equal(at("line1\n.tr").kind, "directive");
-  assert.equal(at("line1\n.tr").query, "tr");
+test("parseGuide keeps the header (class/faction/section directives)", () => {
+  const g = parseGuide(sample);
+  assert.match(g.header, /<< Rogue/);
+  assert.match(g.header, /#name Northshire 1-6/);
 });
 
-test(". does NOT trigger on a decimal mid-line (e.g. coordinates)", () => {
-  assert.equal(at(".goto Elwynn,48.17"), null);
+test("parseGuide extracts the #name as the display name (not the RegisterGuide title)", () => {
+  const block = `RXPGuides.RegisterGuide("Main Title",[[
+<< Rogue
+#name Kamisayo |T236448:0|t Speedrun 1-14
+step
+.hs
+>>x
+]])`;
+  const g = parseGuide(block);
+  assert.equal(g.title, "Main Title");
+  assert.equal(g.name, "Kamisayo |T236448:0|t Speedrun 1-14");
 });
 
-test(". does NOT trigger mid-line after other text", () => {
-  assert.equal(at("some text .goto"), null);
+test("extractStepType classifies steps correctly", () => {
+  const g = parseGuide(sample);
+  assert.equal(g.steps[0].type, "quest");   // .accept
+  assert.equal(g.steps[1].type, "kill");    // .mob/.complete
+  assert.equal(g.steps[2].type, "train");   // .train
+  assert.equal(g.steps[3].type, "hearth");  // .hs
 });
 
-test("~ filter matches the chat-bubble Talk-to snippet", () => {
-  const rows = searchStatic("format", "bubble");
-  const talk = rows.find(r => r.name.includes("Talk"));
-  assert.ok(talk, "Talk-to snippet present");
-  assert.equal(talk.insertName, ">>" + CHAT_BUBBLE + "Talk to ");
+test("load → save round-trip preserves the title (regression: lossy export)", () => {
+  const g = parseGuide(sample);
+  const out = buildGuideOutput(g, {}, "some-other-filename.lua");
+  // The exported title must be the ORIGINAL, not the filename.
+  assert.match(out, /RegisterGuide\("Kamisayo \|T236448:0\|t Speedrun 1-14"/);
+  // And a re-parse must yield the same step count + title (stable round-trip).
+  const g2 = parseGuide(out);
+  assert.equal(g2.title, g.title);
+  assert.equal(g2.steps.length, g.steps.length);
 });
 
-test("~ filter finds the warning token by keyword", () => {
-  const rows = searchStatic("format", "warn");
-  const warn = rows.find(r => r.name.toLowerCase().includes("warning"));
-  assert.equal(warn.insertName, "|cRXP_WARN_|r");
-  // cursor offset should land between the _ and |r
-  assert.equal(warn.caret, "|cRXP_WARN_".length);
+test("buildGuideOutput applies edited step bodies", () => {
+  const g = parseGuide(sample);
+  const edited = { 0: ".goto Elwynn Forest,50,50\n>>EDITED STEP\n" };
+  const out = buildGuideOutput(g, edited, "guide.lua");
+  assert.match(out, />>EDITED STEP/);
+  assert.doesNotMatch(out, /Deputy Willem/); // original step 0 text replaced
 });
 
-test("directive list exposes all core directives", () => {
-  const names = DIRECTIVES.map(d => d.name);
-  for (const d of [".goto", ".accept", ".turnin", ".train", ".hs", ".vendor", ".fly"]) {
-    assert.ok(names.includes(d), `${d} present`);
-  }
+test("normalizeLines collapses CRLF and trailing whitespace", () => {
+  assert.equal(normalizeLines("a  \r\nb\t\r\n\r\n"), "a\nb");
 });
 
-test(".turn filters to .turnin", () => {
-  const rows = searchStatic("directive", "turn");
-  assert.ok(rows.some(r => r.name === ".turnin"));
+test("computeDiff marks an inserted line as add and a removed line as remove", () => {
+  const d = computeDiff("a\nb\nc", "a\nB\nc");
+  const adds = d.filter(x => x.type === "add").map(x => x.text);
+  const removes = d.filter(x => x.type === "remove").map(x => x.text);
+  assert.deepEqual(adds, ["B"]);
+  assert.deepEqual(removes, ["b"]);
 });
 
-test("static snippets insert the same text in all three modes", () => {
-  const r = searchStatic("directive", "goto")[0];
-  assert.equal(r.insertName, r.insertId);
-  assert.equal(r.insertId, r.insertAdvanced);
+test("computeDiff treats CRLF-vs-LF-only changes as no diff", () => {
+  const d = computeDiff("x\r\ny\r\nz", "x\ny\nz");
+  assert.ok(d.every(x => x.type === "same"));
 });

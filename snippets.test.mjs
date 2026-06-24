@@ -1,86 +1,88 @@
-// test/guide.test.mjs — unit tests for the pure guide functions.
+// test/gamedata.test.mjs — validates the bundled game database against
+// known-good reference values. Pure, deterministic, no API cost.
 // Run: node --test
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import {
-  parseGuide, extractStepType, buildGuideOutput, normalizeLines, computeDiff,
-} from "../src/guide.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const sample = readFileSync(join(here, "fixtures", "sample-guide.lua"), "utf8");
+const load = (f) => JSON.parse(readFileSync(join(here, "..", "src", "data", `${f}.json`), "utf8"));
+const T = {
+  quests: load("quests"), npcs: load("npcs"), items: load("items"),
+  zones: load("zones"), spells: load("spells"),
+};
 
-test("parseGuide splits the right number of steps", () => {
-  const g = parseGuide(sample);
-  assert.equal(g.steps.length, 4);
+// Mirror of gamedata.js name normalisation, so tests exercise the same keys.
+function norm(s) {
+  return (s || "")
+    .replace(/\|c[A-Z_]+_([^|]+)\|r/g, "$1")
+    .replace(/\|T[^|]+\|t/g, "")
+    .replace(/\[([^\]]+)\]/g, "$1")
+    .trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+test("quest name → id (Counterattack! = 4021)", () => {
+  assert.deepEqual(T.quests.byName[norm("Counterattack!")], [4021]);
+  assert.equal(T.quests.byId["4021"].name, "Counterattack!");
 });
 
-test("parseGuide captures the original title (incl. icon token)", () => {
-  const g = parseGuide(sample);
-  assert.equal(g.title, "Kamisayo |T236448:0|t Speedrun 1-14");
+test("quest carries level and start/end NPC", () => {
+  const q = T.quests.byId["4021"];
+  assert.equal(q.lvl, 20);
+  assert.deepEqual(q.endU, [3389]); // Regthar Deathgate
 });
 
-test("parseGuide keeps the header (class/faction/section directives)", () => {
-  const g = parseGuide(sample);
-  assert.match(g.header, /<< Rogue/);
-  assert.match(g.header, /#name Northshire 1-6/);
+test("npc name → id + spawn coords + zone (Regthar = 3389, Barrens)", () => {
+  assert.deepEqual(T.npcs.byName[norm("Regthar Deathgate")], [3389]);
+  const npc = T.npcs.byId["3389"];
+  const [x, y, zoneId, zoneName] = npc.coords[0];
+  assert.ok(Math.abs(x - 45.3) < 0.5 && Math.abs(y - 28.4) < 0.5, "coords near 45.3,28.4");
+  assert.equal(zoneId, 17);
+  assert.equal(zoneName, "The Barrens");
 });
 
-test("parseGuide extracts the #name as the display name (not the RegisterGuide title)", () => {
-  const block = `RXPGuides.RegisterGuide("Main Title",[[
-<< Rogue
-#name Kamisayo |T236448:0|t Speedrun 1-14
-step
-.hs
->>x
-]])`;
-  const g = parseGuide(block);
-  assert.equal(g.title, "Main Title");
-  assert.equal(g.name, "Kamisayo |T236448:0|t Speedrun 1-14");
+test("npc lookup strips RXP colour markup", () => {
+  assert.deepEqual(T.npcs.byName[norm("|cRXP_FRIENDLY_Regthar Deathgate|r")], [3389]);
 });
 
-test("extractStepType classifies steps correctly", () => {
-  const g = parseGuide(sample);
-  assert.equal(g.steps[0].type, "quest");   // .accept
-  assert.equal(g.steps[1].type, "kill");    // .mob/.complete
-  assert.equal(g.steps[2].type, "train");   // .train
-  assert.equal(g.steps[3].type, "hearth");  // .hs
+test("item name → id (Linen Cloth = 2589), bracket syntax tolerated", () => {
+  assert.deepEqual(T.items.byName[norm("Linen Cloth")], [2589]);
+  assert.deepEqual(T.items.byName[norm("[Linen Cloth]")], [2589]);
 });
 
-test("load → save round-trip preserves the title (regression: lossy export)", () => {
-  const g = parseGuide(sample);
-  const out = buildGuideOutput(g, {}, "some-other-filename.lua");
-  // The exported title must be the ORIGINAL, not the filename.
-  assert.match(out, /RegisterGuide\("Kamisayo \|T236448:0\|t Speedrun 1-14"/);
-  // And a re-parse must yield the same step count + title (stable round-trip).
-  const g2 = parseGuide(out);
-  assert.equal(g2.title, g.title);
-  assert.equal(g2.steps.length, g.steps.length);
+test("zone name ↔ id (The Barrens = 17)", () => {
+  assert.equal(T.zones.byName[norm("The Barrens")], 17);
+  assert.equal(T.zones.byId["17"], "The Barrens");
 });
 
-test("buildGuideOutput applies edited step bodies", () => {
-  const g = parseGuide(sample);
-  const edited = { 0: ".goto Elwynn Forest,50,50\n>>EDITED STEP\n" };
-  const out = buildGuideOutput(g, edited, "guide.lua");
-  assert.match(out, />>EDITED STEP/);
-  assert.doesNotMatch(out, /Deputy Willem/); // original step 0 text replaced
+test("spell name → all ranks with levels (Rend, Sinister Strike)", () => {
+  const rend = T.spells.byName["rend"];
+  const r1 = rend.find(r => r.rank === "Rank 1");
+  assert.equal(r1.id, 772, "Rend Rank 1 = spell 772");
+  assert.equal(r1.lvl, 4);
+
+  const ss = T.spells.byName["sinister strike"];
+  assert.equal(ss.find(r => r.rank === "Rank 1").id, 1752);
+  // ranks should be ordered ascending by rank number
+  const nums = ss.map(r => parseInt((r.rank.match(/\d+/) || [0])[0], 10)).filter(Boolean);
+  assert.deepEqual(nums, [...nums].sort((a, b) => a - b));
 });
 
-test("normalizeLines collapses CRLF and trailing whitespace", () => {
-  assert.equal(normalizeLines("a  \r\nb\t\r\n\r\n"), "a\nb");
+test("spell professions expose tiers (Blacksmithing)", () => {
+  const bs = T.spells.byName["blacksmithing"];
+  const tiers = bs.map(r => r.rank);
+  assert.ok(tiers.includes("Apprentice") && tiers.includes("Artisan"));
 });
 
-test("computeDiff marks an inserted line as add and a removed line as remove", () => {
-  const d = computeDiff("a\nb\nc", "a\nB\nc");
-  const adds = d.filter(x => x.type === "add").map(x => x.text);
-  const removes = d.filter(x => x.type === "remove").map(x => x.text);
-  assert.deepEqual(adds, ["B"]);
-  assert.deepEqual(removes, ["b"]);
+test("data volumes are in the expected ballpark (no silent truncation)", () => {
+  assert.ok(Object.keys(T.quests.byId).length > 4000, "quests");
+  assert.ok(Object.keys(T.npcs.byId).length > 9000, "npcs");
+  assert.ok(Object.keys(T.items.byId).length > 15000, "items");
+  assert.ok(Object.keys(T.spells.byId).length > 3000, "spells");
 });
 
-test("computeDiff treats CRLF-vs-LF-only changes as no diff", () => {
-  const d = computeDiff("x\r\ny\r\nz", "x\ny\nz");
-  assert.ok(d.every(x => x.type === "same"));
+test("a clear miss returns no key (so the AI falls back to web_search)", () => {
+  assert.equal(T.quests.byName["totally fake quest xyz"], undefined);
 });

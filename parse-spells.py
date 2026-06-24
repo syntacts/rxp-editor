@@ -1,57 +1,61 @@
-#!/usr/bin/env python3
-"""build_spells.py — turn parsed VMaNGOS spell_template data into a lean
-name->id lookup for the RXP editor's .train support.
+# Game data extraction
 
-Input:  spells_raw.json  ({ id: {name, rank, icon, lvl, build} })
-Output: spells.json       ({ byName: {lowername: [{id,rank,lvl}]}, byId: {id:{name,rank,lvl}} })
+The editor's local game database (`src/data/*.json`) is derived from
+[pfQuest](https://github.com/shagu/pfQuest) (GPLv3), which ships WoW Classic
+content with coordinates already converted to map-percentage and tagged by zone
+— exactly the format RXP `.goto` lines use.
 
-Spells that share a name (different ranks) are grouped, so a lookup for
-"sinister strike" returns every rank with its level, letting the AI pick the
-right one for the guide's level bracket.
-"""
-import json, re, sys
+## Regenerating the data
 
-raw = json.load(open(sys.argv[1] if len(sys.argv) > 1 else 'spells_raw.json'))
-raw = {int(k): v for k, v in raw.items()}
+```bash
+# 1. Get pfQuest's vanilla (Era) data
+git clone --depth 1 --filter=blob:none --sparse https://github.com/shagu/pfQuest.git
+cd pfQuest && git sparse-checkout set db && cd ..
 
-def is_junk(name):
-    if not name or name.strip() == "":
-        return True
-    low = name.lower()
-    for bad in ("test", "unused", "deprecated", "[ph]", "ph]", "deprecate",
-                "qaqa", "zzold", "z_", "oldspell", "monster", "creature -",
-                "internal", "debug", "[dnd]", "(dnd)", "(old)", "do not use"):
-        if bad in low:
-            return True
-    if name.startswith("?") or name.startswith("$"):
-        return True
-    return False
+# 2. Extract to lean JSON (requires lua5.3)
+lua5.3 scripts/extract-gamedata.lua pfQuest/db src/data
+```
 
-byId, byName = {}, {}
-for sid, s in raw.items():
-    name = s["name"].strip()
-    if is_junk(name):
-        continue
-    rank = (s.get("rank") or "").strip()
-    lvl = s.get("lvl") or 0
-    rec = {"name": name, "rank": rank, "lvl": lvl}
-    byId[sid] = rec
-    key = name.lower()
-    byName.setdefault(key, []).append({"id": sid, "rank": rank, "lvl": lvl})
+This emits `quests.json`, `npcs.json`, `items.json`, `zones.json`.
 
-# Sort each name's ranks by level then id for stable, sensible ordering.
-def rank_num(r):
-    m = re.search(r'(\d+)', r or "")
-    return int(m.group(1)) if m else 0
-for key in byName:
-    byName[key].sort(key=lambda e: (e["lvl"], rank_num(e["rank"]), e["id"]))
+## What's covered vs. not
 
-out = {"byId": byId, "byName": byName}
-json.dump(out, open(sys.argv[2] if len(sys.argv) > 2 else 'spells.json', 'w'),
-          separators=(',', ':'), ensure_ascii=False)
+| Data | Source | In local DB? |
+|---|---|---|
+| Quest name → ID, level, start/end NPC | pfQuest | ✅ |
+| NPC name → ID + spawn coords + zone | pfQuest | ✅ |
+| Item name → ID | pfQuest | ✅ |
+| Zone name ↔ ID | pfQuest | ✅ |
+| Spell name → ID, **all ranks + levels** (for `.train`/`.cast`) | VMaNGOS | ✅ |
+| Item/spell icon file IDs (for `\|T<id>:0\|t`) | — | ❌ web_search fallback |
 
-print(f"Spells: {len(byId)}  unique names: {len(byName)}")
-# quick checks
-for probe in ["rend", "sinister strike", "fireball", "blacksmithing"]:
-    n = len(byName.get(probe, []))
-    print(f"  {probe!r}: {n} rank(s)")
+Spell names live in the client `Spell.dbc`, which CMaNGOS/classic-db does not
+ship (it loads spells from the DBC at runtime). VMaNGOS, however, mirrors the
+DBC into a `spell_template` SQL table *with names and ranks* — so spells come
+from the [brotalnia/database](https://github.com/brotalnia/database) VMaNGOS
+world dump. See `scripts/parse-spells.py`.
+
+The only remaining web_search case is **icon file IDs** (the numeric `132155`
+in `\|T132155:0\|t`). These are texture FileDataIDs that require mapping
+item/spell → SpellIcon/ItemDisplayInfo → a client listfile — out of scope here.
+Icons are cosmetic; the AI can copy an existing icon token or omit it.
+
+## Regenerating spell data
+
+```bash
+# Download the VMaNGOS world DB (has spell names; pfQuest/CMaNGOS don't)
+curl -L https://github.com/brotalnia/database/raw/master/world_full_14_june_2021.7z -o vmangos.7z
+7z x vmangos.7z
+
+python3 scripts/parse-spells.py world_full_14_june_2021.sql spells_raw.json
+python3 scripts/build-spells.py spells_raw.json src/data/spells.json
+```
+
+## Use the underlying open DB instead
+
+If you ever want fuller data (icons, spells, professions), the cmangos
+[classic-db](https://github.com/classicdb/database) SQL dump is the canonical
+source ClassicDB.ch itself runs on — but its `creature` table stores raw world
+coordinates, so you'd have to do the world→map-percent conversion yourself
+(per-zone WorldMapArea bounds). pfQuest already did that conversion, which is
+why it's the better starting point here.
